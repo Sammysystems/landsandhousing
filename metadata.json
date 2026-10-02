@@ -1,0 +1,6 @@
+{
+  "name": "LandsandHousing - Property Advisory & Real Estate, Uyo",
+  "description": "Premium commercial and residential real estate advisory, property management, costing, and sales in Uyo, Akwa Ibom, Nigeria.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
