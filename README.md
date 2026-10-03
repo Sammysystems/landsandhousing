@@ -98,6 +98,8 @@ change here is deployed.
 - **[ONBOARDING.md](ONBOARDING.md)** — how to bring a new client onto this kind
   of project: what we need from them, how we intake their listings and services,
   how we agree the assistant's behaviour, and how we hand it over.
+- **[DEPLOYING.md](DEPLOYING.md)** — how the live site is published, and where
+  every secret lives.
 - **Security** — no credentials are stored in this repository. See
   [.env.example](.env.example) for the template and where real values belong.
 

@@ -25,3 +25,6 @@ coverage/
 .roo
 .trae
 .windsurf
+
+# GitHub Actions Pages workflow - held back until theworkflow scope is granted
+.github/workflows/pages.yml
