@@ -5,6 +5,10 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // Relative asset paths so the same build works from a domain root *and* from a
+    // GitHub Pages project path (/landsandhousing/). Nothing here uses client-side
+    // routing, so relative URLs are safe.
+    base: './',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
