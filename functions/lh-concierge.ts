@@ -76,6 +76,13 @@ type Filters = {
   min_beds?: number;
 };
 
+// Our qualifier says "buy"; the catalogue says "Sale". Translate, don't pass through.
+const PURPOSE_TO_DB: Record<string, string> = {
+  buy: 'Sale', sale: 'Sale', purchase: 'Sale', rent: 'Rent', leasing: 'Rent',
+  invest: 'Invest', investment: 'Invest',
+};
+const dbPurpose = (p?: string | null): string | null => (p ? PURPOSE_TO_DB[p] ?? null : null);
+
 const PURPOSE_WORDS: Array<[RegExp, string]> = [
   [/\b(for\s+sale|to\s+buy|buying|purchase)\b/i, 'Sale'],
   [/\b(to\s+rent|renting|for\s+rent|lease)\b/i, 'Rent'],
@@ -176,9 +183,14 @@ function inferCategory(msg: string): string | null {
   return null;
 }
 
-type Intent = 'greeting' | 'contact' | 'property' | 'knowledge' | 'booking' | 'handoff' | 'smalltalk';
+type Intent = 'greeting' | 'contact' | 'property' | 'knowledge' | 'booking' | 'handoff' | 'smalltalk' | 'declined';
 
-const CONTACT_RE = /(\+?[\d][\d\s()-]{7,}\d)|[\w.+-]+@[\w-]+\.[\w.]+/;
+// A real phone number starts with a leading zero, a +, or a separator. A bare
+// digit run with none of those is money — "200000000" is a ₦200M budget, and
+// treating it as a phone number silently dropped the answer we asked for.
+const CONTACT_RE = /(\+?\d[\d\s()-]{7,}\d(?=\D|$))|[\w.+-]+@[\w-]+\.[\w.]+/;
+const PHONE_RE = /(?:\+?234|0)[\d\s()-]{8,13}\d/;
+const isContactText = (t: string) => PHONE_RE.test(t) || /[\w.+-]+@[\w-]+\.[\w.]{2,}/.test(t);
 
 /**
  * Classification is priority-ordered rather than first-match, because question forms
@@ -371,10 +383,7 @@ const PERSONA = {
 type Qual = Record<string, any>;
 
 const OPENING_ADVISOR =
-  `Hi, I'm ${PERSONA.name}, a property advisor with ${PERSONA.org}. ` +
-  `Nice to meet you.\n\n` +
-  `Before I pass you to one of our agents, I'd like to properly understand what you're after — ` +
-  `that way you speak to someone who actually has what you need, and nobody wastes your time.\n\n`;
+  `Hi, I'm ${PERSONA.name}, a property advisor at ${PERSONA.org}.`;
 
 const OPENING_BROWSE =
   `Hi, I'm ${PERSONA.name} 👋 I'm the ${PERSONA.title} here at ${PERSONA.org}.\n\n` +
@@ -416,8 +425,8 @@ const BUDGET_BANDS: Array<{ label: string; value: string; max: number | null; mi
 
 const STEPS: Step[] = [
   {
-    key: 'purpose',
-    ask: () => 'So — what brings you to us today?',
+key: 'purpose',
+    ask: () => 'What brings you to us today?',
     options: () => [
       { label: "I'm buying", value: 'buy' },
       { label: "I'm renting", value: 'rent' },
@@ -570,14 +579,14 @@ parse: (t) => {
     key: 'phone',
     applies: (q) => q.purpose !== 'explore',
     ask: () => 'Last one, I promise — what\'s the best number for our advisor to reach you on?',
-    parse: (t) => {
+parse: (t) => {
       const digits = t.replace(/[^\d]/g, '');
       if (digits.length >= 10 && digits.length <= 15) return { phone: digits };
       if (digits.length >= 7 && digits.length <= 15) return { phone: digits };
       return null;
     },
   },
-];
+  ];
 
 const TIMELINE_LABEL: Record<string, string> = {
   now: 'Ready to move now',
@@ -648,17 +657,24 @@ const NAME_SHAPED = /^[A-Z][a-z'’-]{1,20}(?:\s+(?:from\s+|in\s+|at\s+)?[A-Z][a
 
 function scanIntake(text: string, q: Qual, zones: string[], pending: string | null = null): Qual {
   const out: Qual = {};
-  for (const key of ['purpose', 'budget', 'ptype', 'zone', 'beds', 'timeline', 'phone', 'email']) {
+  // A bare "2" answering the budget question is two million naira, not a
+  // 2-bedroom flat. Only let the bedroom parser see loose digits when bedrooms
+  // are actually the question on the table.
+  const isContact = isContactText(text);
+
+  for (const key of ['purpose', 'budget', 'ptype', 'zone', 'beds', 'timeline', 'phone']) {
     const step = STEPS.find((s) => s.key === key);
     if (!step) continue;
 
-    // A bare "2" answering the budget question is two million naira, not a
-    // 2-bedroom flat. Only let the bedroom parser see loose digits when bedrooms
-    // are actually the question on the table.
     if (key === 'beds' && pending !== 'beds' && !/(\d+)\s*(?:bed|br|bedroom)/i.test(text)) continue;
+    // A phone number or email is never a budget, a property type or an area.
+    if (isContact && key !== 'phone' && key !== 'email') continue;
 
-    // "200000000" with no symbol is still a naira figure when budget is pending.
-    const probe = key === 'budget' && /^\d{5,}$/.test(text.trim()) ? `₦${text.trim()}` : text;
+    // "200000000" with no symbol is still a naira figure when budget is pending. A
+    // phone number is not: "08033445566" parsed as a budget of ₦8033M, which is
+    // both absurd and the sort of error that quietly poisons a lead brief.
+    const bareAmount = /^\d{6,10}$/.test(text.trim()) && !/^0/.test(text.trim());
+    const probe = key === 'budget' && bareAmount ? `₦${text.trim()}` : text;
 
     const got = step.parse(probe, q, zones);
     if (!got) continue;
@@ -671,6 +687,12 @@ function scanIntake(text: string, q: Qual, zones: string[], pending: string | nu
   // Names are the one field where a loose parser is dangerous: "I want to buy"
   // would otherwise be filed as somebody's name. Take it when they volunteer it,
   // when we're asking for it, or when it is short and obviously not a sentence.
+  // Email is never asked as a form field, but people hand it over unprompted.
+  if (!q.email) {
+    const m = text.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/);
+    if (m) out.email = m[0];
+  }
+
   if (q.name === undefined || q.name === null) {
     const raw = text.trim().replace(/\s+/g, ' ');
     const volunteered = /^(my name is|i am|i'm|it'?s|this is|name'?s?|call me)\s+/i.test(raw);
@@ -692,8 +714,8 @@ function scanIntake(text: string, q: Qual, zones: string[], pending: string | nu
 function nextStep(q: Qual, zones: string[]) {
   for (const s of STEPS) {
     if (s.applies && !s.applies(q)) continue;
-    const answered =
-      s.key === 'name' ? Boolean(q.name)
+const answered =
+        s.key === 'name' ? Boolean(q.name)
       : s.key === 'phone' ? Boolean(q.phone)
       : s.key === 'beds' ? q.beds !== undefined
       : q[s.key] !== undefined && q[s.key] !== null && q[s.key] !== '';
@@ -828,6 +850,33 @@ if (!message) return json({ error: 'message required' }, 400);
   let intent = classify(heard);
   const filters = extractFilters(heard, zones);
 
+  // "Yes" has to mean *yes to what we just offered*. Left unhandled it fell through
+  // to the outstanding qualification question, so agreeing to an inspection quietly
+  // re-asked what brought them in — the single most confusing thing the chat did.
+  const priorOffer = (qual.offer ?? null) as { propertyId: string; propertyTitle: string } | null;
+  const AFFIRMATIVE = /^(yes|yeah|yep|yup|yep+sure|sure|ok|okay|alright|great|perfect|please|please do|go ahead|do it|book it|book that|sounds good|that works|lets do it|let'?s do it|i'?d like to|sign me up|count me in)\b/i;
+  const NEGATIVE = /^(no|nope|nah|not now|not yet|maybe later|skip|pass)\b/i;
+  // Once we've asked for a date, the next message is almost always the date —
+  // "Friday", "next week", "the 14th". Treating that as small talk bounced people
+  // back to the qualification question right when they were one step from booked.
+  const DATE_ANSWER =
+    /\b(\d{4}-\d{2}-\d{2}|mon|tue|wed|thu|fri|sat|sun)(day)?\b|^\d{1,2}(st|nd|rd|th)?$|\b(next|this)\s+(week|month|tuesday|wednesday|thursday|friday|saturday|sunday|mon)/i;
+  const DATE_PART =
+    /\b(morning|afternoon|evening|am|pm)\b|\b\d{1,2}\s*(am|pm)\b/i;
+  // Once they have told us a day, the slot is the only thing left to ask for.
+  // Re-opening "what date works?" after they already gave one is the loop that
+  // made the booking feel like it was going nowhere.
+  const askedSlotOnly = Boolean(
+    priorOffer && typeof (qual as Record<string, any>).offerSlotAsked === 'string',
+  );
+  const acceptedOffer =
+    priorOffer &&
+    heard.trim().length <= 40 &&
+    (AFFIRMATIVE.test(heard.trim()) || DATE_ANSWER.test(heard) || DATE_PART.test(heard));
+  const declinedOffer = priorOffer && NEGATIVE.test(heard.trim());
+  if (acceptedOffer) intent = 'booking';
+  if (declinedOffer && !acceptedOffer) intent = 'declined';
+
   // A bare area name is someone restating where they want to look, not a support
   // request or small talk. Without this, "Shelter Afric" gets answered like a query.
   if (heard.length < 40 && zones.some((z) => heard.toLowerCase().includes(z.toLowerCase().split(' ')[0]))) {
@@ -838,7 +887,14 @@ if (!message) return json({ error: 'message required' }, 400);
   const stepBefore = nextStep(qual, zones);
   const blockedFromAbsorbing =
     intent === 'knowledge' || intent === 'handoff' || intent === 'greeting' || intent === 'thank';
-  const parsed: Partial<Qual> = stepBefore && !blockedFromAbsorbing ? stepBefore.parse(heard, qual, zones) ?? {} : {};
+  // The pending-step parser is the one that guessed wrong: with budget on the table,
+  // "08033445566" parsed as a ₦8033M budget. A message that is purely contact details
+  // is never the answer to a non-contact step.
+  const contactOnly = isContactText(heard) && !stepBefore?.key.match(/phone|email/);
+  const parsed: Partial<Qual> =
+    stepBefore && !blockedFromAbsorbing && !contactOnly
+      ? stepBefore.parse(heard, qual, zones) ?? {}
+      : {};
   // Notice anything else they volunteered in the same breath. This is what makes
   // "I need a house at Shelter" count as two answers instead of a failed form entry.
   // scanIntake handles name/phone/email itself (with tighter guards than the raw
@@ -868,7 +924,6 @@ if (!message) return json({ error: 'message required' }, 400);
   //   row the same question has gone unanswered.
   const pendingOptions = stepAfter?.options?.(qual, zones) ?? [];
   const signature = stepAfter ? `${stepAfter.key}|${pendingOptions.map((o) => o.value).join(',')}` : '';
-  const chipsRepeated = Boolean(stepAfter) && qual.offered === signature;
   const stalled = stepAfter ? (qual.asked === stepAfter.key ? (Number(qual.askedCount) || 0) + 1 : 1) : 0;
 
   // Save the turn + whatever we just learned.
@@ -884,6 +939,10 @@ if (!message) return json({ error: 'message required' }, 400);
   let source: 'deterministic' | 'llm' = 'deterministic';
   let cards: Array<Record<string, any>> = [];
   let actions: Array<Record<string, any>> = [];
+// The thing we asked about last turn that the visitor can now say yes/no to.
+let offer: { propertyId: string; propertyTitle: string } | null = null;
+  // Set to a day string when we've asked only for the time window; null clears it.
+  let offerSlotAsked: string | null | undefined = undefined;
   let matchedBy = '';
 
   switch (intent) {
@@ -948,6 +1007,20 @@ case 'property': {
 // keep the type/zone/purpose they gave us, or "cheapest land" ends up listing
 // houses. Only the free-text query and numeric caps are relaxed.
 const byPrice = /\b(cheapest|lowest|least|smallest|budget\s+friendly|affordable)\b/i.test(heard);
+      // "cheapest land" must not head a house as the cheapest land. The type lives
+      // in the title and description, so filter on those rather than a null column.
+      const wantType = /\b(land|plot|acre|hectare|site)\b/i.test(heard) ? /\b(land|plot|acre|hectare|parcel|site)\b/i
+        : /\b(commercial|office|retail|shop|plaza|suites?)\b/i.test(heard) ? /\b(commercial|office|retail|shop|plaza|suites?|mixed)\b/i
+        : /\b(residential|house|apartment|flat|home|duplex)\b/i.test(heard) ? /\b(residential|house|apartment|flat|home|duplex|villa|terrace|mansion)\b/i
+        : null;
+
+      // "show me other properties" / "what do you have?" is a request to see the
+      // book, not a keyword search. Passing the sentence itself as free text
+      // matches nothing and returns a confident "no listing matches that".
+      const browseAll = Boolean(
+        wantsListings && !byPrice && !filters.zone && !filters.ptype &&
+        !filters.max_price && !filters.min_beds && !knownZone0 && !knownPtype0,
+      );
 
       // Search with what we already know, not just this one message. "Which options
       // do you have?" after they told us Ewet must mean Ewet — re-parsing the
@@ -962,13 +1035,19 @@ const byPrice = /\b(cheapest|lowest|least|smallest|budget\s+friendly|affordable)
         {
           // Free text only when we have nothing structured to go on; otherwise the
           // question words ("which options do you have") drag the ranking to zero.
-          arg_q: byPrice || structured ? null : filters.q ?? null,
-          arg_purpose: filters.purpose ?? knownPurpose ?? null,
-          arg_ptype: filters.ptype ?? knownPtype ?? null,
+          arg_q: byPrice || structured || browseAll ? null : filters.q ?? null,
+          // The catalogue stores purpose as Sale / Rent / Invest. Our qualifier
+          // speaks "buy" / "rent" / "invest", and passing "buy" straight through
+          // matched nothing — which read as "we have no properties", the worst
+          // possible answer to give someone who just said they wanted to buy.
+          arg_purpose: filters.purpose ?? dbPurpose(knownPurpose),
+          // property_type is null on every row in the catalogue, so filtering on
+          // it can only ever return zero. Keep the type for display, not the query.
+          arg_ptype: null,
           arg_zone: filters.zone ?? knownZone ?? null,
           arg_max_price: byPrice ? null : filters.max_price ?? qual.budget_max ?? null,
           arg_min_beds: byPrice ? null : filters.min_beds ?? qual.beds ?? null,
-          arg_limit: byPrice ? 50 : 6,
+          arg_limit: byPrice || browseAll ? 50 : 6,
         },
       );
       matchedBy = r?.matched_by ?? 'none';
@@ -1004,34 +1083,40 @@ const byPrice = /\b(cheapest|lowest|least|smallest|budget\s+friendly|affordable)
           );
           if (forSale.length) cards = forSale;
         }
+        // Only narrow to the requested type when it leaves something standing —
+        // an over-eager filter must not turn into "we have nothing".
+        if (wantType) {
+          const ofType = cards.filter((c: any) =>
+            wantType.test(`${c.title ?? ''} ${c.description ?? ''} ${c.highlights?.join?.(' ') ?? ''}`));
+          if (ofType.length) cards = ofType;
+        }
         if (cards.length > 1) {
           cards.sort((a: any, b: any) => Number(a.price_raw ?? Infinity) - Number(b.price_raw ?? Infinity));
           cards = cards.slice(0, 3);
         }
       }
 
+      if (browseAll && cards.length > 4) cards = cards.slice(0, 4);
+
       if (!cards.length) {
         reply = noMatch;
-      } else if (byPrice) {
+      } else {
         const lead = cards[0];
-        reply =
-          `It starts at ${lead.price_label ?? lead.price_raw} — that's ${lead.title} in ${lead.zone ?? 'Uyo'}.\n\n` +
-          `${bullet(cards)}\n\nWant me to line up an inspection for "${lead.title}"?`;
+        const where = !byPrice && knownZone && !filters.zone ? ` in ${knownZone}` : '';
+        const verb = !byPrice && cards.length === 1 ? 'fits' : 'fit';
+        const headline = byPrice
+          ? `It starts at ${lead.price_label ?? lead.price_raw} — that's ${lead.title} in ${lead.zone ?? 'Uyo'}.\n\n${bullet(cards)}`
+          : browseAll
+            ? `Here's what we currently have${where ? where : ''}:\n\n${bullet(cards)}`
+            : `Here ${cards.length === 1 ? 'is one place' : `are ${cards.length} places`} that ${verb} what you described${where}:\n\n${bullet(cards)}`;
+        reply = `${headline}\n\nWant me to line up an inspection for "${lead.title}"?`;
         actions = [
           { type: 'book', label: 'Book an inspection', propertyId: lead.id, propertyTitle: lead.title },
           { type: 'whatsapp', label: 'Continue on WhatsApp' },
         ];
-      } else {
-        const lead = cards[0];
-        const where = knownZone && !filters.zone ? ` in ${knownZone}` : '';
-        const verb = cards.length === 1 ? 'fits' : 'fit';
-        reply =
-          `Here ${cards.length === 1 ? 'is one place' : `are ${cards.length} places`} that ${verb} what you described${where}:\n\n${bullet(cards)}\n\n` +
-          `Want me to line up an inspection for "${lead.title}"?`;
-        actions = [
-          { type: 'book', label: `Book an inspection`, propertyId: lead.id, propertyTitle: lead.title },
-          { type: 'whatsapp', label: 'Continue on WhatsApp' },
-        ];
+        // Remember what we just offered, so a plain "yes" on the next turn books
+        // *this* property instead of falling through to the qualification question.
+        offer = { propertyId: lead.id, propertyTitle: lead.title };
       }
       break;
     }
@@ -1099,7 +1184,57 @@ if (!r?.count) {
       break;
     }
 
+case 'declined': {
+      // Say yes to the question they actually asked, and don't pile the
+      // qualification question on top — one question per turn.
+      reply =
+        `No problem — I'll leave it there. ` +
+        (priorOffer?.propertyTitle ? `If you change your mind about "${priorOffer.propertyTitle}", just say so. ` : '') +
+        `What would you like to do instead?`;
+      actions = [
+        { type: 'property', label: 'See other properties', propertyId: null },
+        { type: 'whatsapp', label: 'Talk to an advisor' },
+      ];
+      break;
+    }
+
     case 'booking': {
+      // A "yes" to a specific offer already names the property — don't make them
+      // choose again from a list they just looked at.
+      if (acceptedOffer && priorOffer) {
+        actions = [
+          { type: 'book', label: 'Choose a date', propertyId: priorOffer.propertyId, propertyTitle: priorOffer.propertyTitle },
+        ];
+        const iso = heard.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? null;
+        const dayWord = heard.match(/\b(mon|tue|wed|thu|fri|sat|sun)(day)?\b|\bnext\s+(week|monday|tuesday|wednesday|thursday|friday)\b/i);
+        const slot = heard.match(/\b(morning|afternoon|evening)\b/i)?.[1]?.toLowerCase() ?? null;
+        // They've given us the date part. Say it back and ask only the one thing
+        // still missing, instead of repeating the whole question.
+        if (dayWord || iso) {
+          const said = iso ?? dayWord![0].replace(/\b\w/g, (c) => c.toUpperCase());
+          reply = slot
+            ? `Perfect — ${said}, ${slot}. I'll get that confirmed for you now.`
+            : `${said} it is. Would you prefer morning or afternoon?`;
+          offerSlotAsked = slot ? null : said;
+          actions = [{ type: 'book', label: 'Choose a date', propertyId: priorOffer.propertyId, propertyTitle: priorOffer.propertyTitle, date: said, slot }];
+        } else if (slot) {
+          // They're answering the time-of-day half. Don't ask for the date again.
+          const day = askedSlotOnly ? (qual as Record<string, any>).offerSlotAsked : null;
+          reply = day
+            ? `Perfect — ${day}, ${slot}. I'll get that confirmed for you now.`
+            : `Morning or afternoon works either way. Which date should I put it down for?`;
+          actions = [
+            { type: 'book', label: 'Choose a date', propertyId: priorOffer.propertyId, propertyTitle: priorOffer.propertyTitle, date: day ?? null, slot },
+          ];
+        } else {
+          reply =
+            `Great — let's get "${priorOffer.propertyTitle}" booked in. ` +
+            `What date works for you, and would you prefer morning or afternoon?`;
+        }
+        if (iso) actions[0].date = iso;
+        offer = priorOffer;
+        break;
+      }
       const props = await rpc<{ items: Array<Record<string, any>> }>('lh_search_properties', {
         arg_q: filters.q ?? null, arg_limit: 3,
       });
@@ -1200,31 +1335,43 @@ if (stepAfter) {
     // too, and so is handing over a name, number or figure. Escalate only when we
     // are genuinely being ignored: three turns that neither answered, asked
     // anything, nor acknowledged us.
-    const courtesy = intent === 'greeting' || intent === 'smalltalk' || intent === 'contact' || absorbedSomething || wantsBooking;
-    const stuck = stalled >= 3 && !answeredRealQuestion && !courtesy;
+    const courtesy = intent === 'greeting' || intent === 'smalltalk' || intent === 'contact' || absorbedSomething || wantsBooking || intent === 'declined';
 
-    let ask = stepAfter.ask(qual);
-    if (stalled === 2 && !answeredRealQuestion && !courtesy) {
-      ask = `${ask}\n\nOr just tell me in your own words — whichever is easier.`;
+// One question per turn. This reply already asks something — "Want me to line
+    // up an inspection for X?" — so appending the outstanding qualification
+    // question as well leaves the visitor with two questions and no idea which one
+    // we meant. The buttons still answer the outstanding step, so nothing is lost.
+    const alreadyAsking = /\?\s*$/.test(reply.trim());
+    let stuck = false;
+
+    if (!alreadyAsking) {
+      let ask = stepAfter.ask(qual);
+      if (stalled === 2 && !answeredRealQuestion && !courtesy) {
+        ask = `${ask}\n\nOr just tell me in your own words — whichever is easier.`;
+      }
+      stuck = stalled >= 3 && !answeredRealQuestion && !courtesy;
+      if (stuck) {
+        ask =
+          "I don't want to keep putting the same question to you.\n\n" +
+          'I can pass you to an advisor on WhatsApp with everything you have told me so far, ' +
+          'or you can pick one of the options below.';
+      }
+      const lead = wantsBooking ? "I'd love to get that sorted for you." : '';
+      reply = `${reply}\n\n${lead ? `${lead} ` : ''}${ask}`.trim();
     }
-    if (stuck) {
-      ask =
-        "I don't want to keep putting the same question to you.\n\n" +
-        'I can pass you to an advisor on WhatsApp with everything you have told me so far, ' +
-        'or you can pick one of the options below.';
-    }
 
-    const lead = wantsBooking ? "I'd love to get that sorted for you." : '';
-    reply = `${reply}\n\n${lead ? `${lead} ` : ''}${ask}`.trim();
-
-    // Only offer a given set once — re-sending the same buttons under every reply
-    // reads like a form that ignored you.
+    // The buttons are the answer to the question we just asked, so they belong on
+    // screen whenever we ask it. They only get suppressed when we made an offer
+    // instead (those buttons are the offer), or when the visitor has stalled and
+    // we're escalating. Hiding the answer to a question that's still on screen is
+    // what left people stuck with nothing to click.
     const chips = options.map((o) => ({ type: 'option', label: o.label, value: o.value }));
-    actions = chipsRepeated ? [] : chips;
+    const branchActions = actions;
+    actions = alreadyAsking && branchActions.length ? branchActions : chips;
     if (stuck) {
       actions = [
         { type: 'whatsapp', label: 'Talk to an advisor on WhatsApp' },
-        ...(chipsRepeated ? [] : chips.slice(0, 2)),
+        ...chips.slice(0, 2),
       ];
     }
   } else if (qual.purpose === 'explore') {
@@ -1247,7 +1394,9 @@ if (stepAfter) {
     cards = matchList.slice(0, 3);
     summary = buildSummary(qual, null);
 
-    if (qual.name && qual.phone) {
+// Commit the lead once, on the turn the contact details actually arrive.
+    let justCompleted = false;
+    if (qual.name && qual.phone && !qual.lead_id) {
       const saved = await rpc<{ ok: boolean; leadId?: number }>('lh_commit_lead', {
         arg_session_id: sessionId,
         arg_name: qual.name,
@@ -1256,8 +1405,10 @@ if (stepAfter) {
         arg_summary: summary,
         arg_qualification: qual,
       });
-      if (saved?.ok) qual.lead_id = saved.leadId;
+      if (saved?.ok) { qual.lead_id = saved.leadId; justCompleted = true; }
     }
+
+    if (justCompleted) {
 
 // Only restate the requirements if they haven't just been echoed back.
     const seen = absorbedSomething ? '' : naturalise(qual);
@@ -1274,16 +1425,27 @@ if (stepAfter) {
         ? ` Shall I put you down for an inspection, ${String(qual.name).split(' ')[0]}?`
         : ` Would you like to book an inspection?`)
         .replace(/\n{3,}/g, '\n\n');
-    actions = [
+actions = [
       { type: 'book', label: 'Book an inspection' },
       { type: 'whatsapp', label: 'Continue on WhatsApp' },
     ];
+    }
   }
 
-  // Persist the assistant turn and the state we ended in.
+// Persist the assistant turn and the state we ended in.
   await saveState(
     sessionId,
-    { stage },
+    {
+      stage,
+      // Remember the offer so the next "yes" can be resolved. A declined or spent
+      // offer is cleared, otherwise a later "yes" would book something from ten
+      // turns ago.
+      ...(offer ? { offer } : declinedOffer || acceptedOffer ? { offer: null } : {}),
+      // Persist the lead id, or the lead is re-committed (and re-announced) every turn.
+      ...(qual.lead_id ? { lead_id: qual.lead_id } : {}),
+      // Remember the day we already took, so a later "morning" doesn't re-ask the date.
+      ...(offerSlotAsked !== undefined ? { offerSlotAsked } : {}),
+    },
     { role: 'assistant', at: new Date().toISOString(), text: reply },
     summary,
   );
