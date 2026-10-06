@@ -1,71 +1,105 @@
 import React, {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
   useState,
 } from 'react';
-import { Mic, Volume2, VolumeX } from 'lucide-react';
 import {
   startListening,
   stopListening,
   stopSpeaking,
   stopAll,
   speak as engineSpeak,
-  supportsVoice,
 } from '../lib/voice-engine';
 
 /**
- * VoiceAgent — the mic + spoken-reply controls for the concierge.
+ * VoiceAgent — the voice engine controller for the concierge.
  *
- * Renders two controls for the composer: a speaker toggle (mute spoken replies)
- * and a mic button (tap to start/stop dictation). While listening, a live
- * interim-transcript pill floats above the composer, and while Aisha is speaking
- * the same pill (temporarily) says so.
+ * It owns the (single) recognition + speech-synthesis session and reports its
+ * live state upward through `onStatus`. The mic and mute flags are CONTROLLED by
+ * the parent (single source of truth shared by the chat composer and the call
+ * screen), so only one engine instance is ever alive — it survives view
+ * switches between chat and the call UI.
  *
- * Echo-safe duplex: the mic is suspended while Aisha talks and automatically
- * resumes when she stops — so she never hears herself and no feedback loop forms.
- * Barge-in is still possible by tapping the mic at any time.
+ * Rendered UI: only the interim/status pill (chat view). The mic/mute buttons
+ * live in the view that needs them and drive this component through the props.
  *
- * The panel parent must be `relative`/positioned; the pill is absolutely placed
- * above the composer. Spoken replies are driven by the parent through the
- * imperative handle (`speak`).
+ * Echo-safe duplex: the mic is suspended while the agent speaks and resumes on
+ * end — she never hears herself, so no feedback loop.
  */
+
+export type VoiceStatus = {
+  micOn: boolean;
+  listening: boolean;
+  suspended: boolean;
+  speaking: boolean;
+  muted: boolean;
+  interim: string;
+};
 
 export type VoiceAgentHandle = {
   speak: (text: string) => void;
   stop: () => void;
+  /** Silence an in-flight reply without touching the microphone session. */
+  cut: () => void;
 };
 
 type Props = {
-  /** Panel is open — everything shuts down (listening + speech) when false. */
+  /** Panel open — false stops everything. */
   enabled: boolean;
-  /** Called when the visitor has said a complete phrase (final transcript). */
+  /** Controlled mic intent. */
+  micOn: boolean;
+  /** Controlled mute for spoken replies. */
+  muted: boolean;
+  onMicChange: (on: boolean) => void;
+  onMutedChange: (muted: boolean) => void;
   onTranscript: (text: string) => void;
+  onStatus: (status: VoiceStatus) => void;
+  /** Chat view shows the pill; the call screen renders its own status. */
+  pillVisible: boolean;
 };
 
 const NOTICE_MS = 4200;
 
+const DEFAULT_STATUS: VoiceStatus = {
+  micOn: false,
+  listening: false,
+  suspended: false,
+  speaking: false,
+  muted: false,
+  interim: '',
+};
+
 const VoiceAgent = forwardRef<VoiceAgentHandle, Props>(
-  function VoiceAgent({ enabled, onTranscript }, ref) {
-    const [supported] = useState<boolean>(() => supportsVoice());
-    const [muted, setMuted] = useState(false);
-    const [micOn, setMicOn] = useState(false); // user intent
-    const [suspended, setSuspended] = useState(false); // paused while giving a voice reply
+  function VoiceAgent(
+    { enabled, micOn, muted, onMicChange, onMutedChange, onTranscript, onStatus, pillVisible },
+    ref,
+  ) {
+    const [suspended, setSuspended] = useState(false);
+    const [listening, setListening] = useState(false);
+    const [speaking, setSpeaking] = useState(false);
     const [interim, setInterim] = useState('');
     const [notice, setNotice] = useState<string | null>(null);
 
-    const latest = useRef({ enabled, micOn, muted, onTranscript, suspended });
-    latest.current = { enabled, micOn, muted, onTranscript, suspended };
+    const latest = useRef({ onTranscript, onMicChange, onMutedChange });
+    latest.current = { onTranscript, onMicChange, onMutedChange };
 
+    const listeningRef = useRef(false);
+    const speakingRef = useRef(false);
     const noticeTimer = useRef<number | null>(null);
     const speakId = useRef(0);
 
-    const beginListen = () => {
+    const beginListen = useCallback(() => {
+      listeningRef.current = true;
+      setListening(true);
       setSuspended(false);
       setInterim('');
       setNotice(null);
-      stopSpeaking(); // fresh pickup interrupts anything Aisha was saying
+      stopSpeaking();
+      speakingRef.current = false;
+      setSpeaking(false);
       startListening({
         onInterim: (t) => setInterim(t),
         onFinal: (t) => {
@@ -73,33 +107,41 @@ const VoiceAgent = forwardRef<VoiceAgentHandle, Props>(
           latest.current.onTranscript(t);
         },
         onError: (msg) => {
-          stopMic();
+          listeningRef.current = false;
+          setListening(false);
           setNotice(msg);
+          if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
+          noticeTimer.current = window.setTimeout(() => setNotice(null), NOTICE_MS);
         },
       });
-    };
+    }, []);
 
-    const stopMic = () => {
-      setMicOn(false);
+    const stopMic = useCallback(() => {
+      listeningRef.current = false;
+      setListening(false);
       setSuspended(false);
       setInterim('');
       stopListening();
-    };
+    }, []);
 
-    const toggleMic = () => {
-      if (micOn || suspended) {
+    // Controlled mic: reconcile intent with the engine.
+    useEffect(() => {
+      if (!enabled) return;
+      if (micOn) {
+        if (!listeningRef.current) beginListen();
+      } else if (listeningRef.current) {
         stopMic();
-        return;
       }
-      setMicOn(true);
-      beginListen();
-    };
+    }, [micOn, enabled, beginListen, stopMic]);
 
     // Full shutdown whenever the panel closes.
     useEffect(() => {
       if (!enabled) {
-        setMicOn(false);
+        listeningRef.current = false;
+        speakingRef.current = false;
+        setListening(false);
         setSuspended(false);
+        setSpeaking(false);
         setInterim('');
         stopAll();
       }
@@ -109,14 +151,8 @@ const VoiceAgent = forwardRef<VoiceAgentHandle, Props>(
       };
     }, [enabled]);
 
-    const flash = (msg: string) => {
-      setNotice(msg);
-      if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
-      noticeTimer.current = window.setTimeout(() => setNotice(null), NOTICE_MS);
-    };
-
     const resumeIfWanted = (id: number) => {
-      if (id !== speakId.current || !latest.current.enabled || !latest.current.micOn) return;
+      if (id !== speakId.current || !listeningRef.current) return;
       beginListen();
     };
 
@@ -125,33 +161,60 @@ const VoiceAgent = forwardRef<VoiceAgentHandle, Props>(
       () => ({
         speak: (text: string) => {
           const l = latest.current;
-          if (l.muted || !text.trim()) return;
+          if (muted || !text.trim()) return;
           const id = ++speakId.current;
-          // Mic on? Suspend hearing while we talk (echo guard), resume on end.
-          if (l.micOn && !l.suspended) {
-            stopListening();
+          // Suspend hearing while we talk (echo guard); resume on end.
+          if (listeningRef.current) {
+            listeningRef.current = false;
+            setListening(false);
             setSuspended(true);
           }
-          // Only the newest utterance carries the resume; superseded ones skip.
-          engineSpeak(text, { onEnd: () => resumeIfWanted(id) });
+          speakingRef.current = true;
+          setSpeaking(true);
+          engineSpeak(text, {
+            onEnd: () => {
+              if (speakId.current === id) {
+                speakingRef.current = false;
+                setSpeaking(false);
+              }
+              resumeIfWanted(id);
+            },
+          });
         },
         stop: () => {
           stopMic();
           stopSpeaking();
+          speakingRef.current = false;
+          setSpeaking(false);
+        },
+        cut: () => {
+          speakId.current++; // supersede any pending resume
+          speakingRef.current = false;
+          setSpeaking(false);
+          stopSpeaking();
         },
       }),
-      [],
+      [muted, stopMic],
     );
 
-    const micActive = (micOn || suspended) ? 'bg-[#A98946] text-white border-[#A98946]' : '';
-    const pill =
-      notice ??
-      (suspended ? 'Aisha is speaking…' : interim || (micOn ? 'Listening…' : null));
-    const listening = micOn && !suspended;
+    // Report live state upward.
+    useEffect(() => {
+      onStatus({
+        micOn,
+        listening,
+        suspended,
+        speaking,
+        muted,
+        interim: interim || notice || '',
+      });
+    }, [micOn, listening, suspended, speaking, muted, interim, notice, onStatus]);
+
+    const pill = notice ?? (suspended ? 'Aisha is speaking…' : interim || (listening ? 'Listening…' : null));
+    const pillVisibleNow = pillVisible && (listening || suspended || notice) && pill !== null;
 
     return (
       <>
-        {supported && enabled && pill && (
+        {pillVisibleNow && (
           <div className="absolute left-3 right-3 bottom-[84px] z-10 flex items-center gap-2 bg-[#171716] text-white rounded-xl px-3.5 py-2.5 shadow-xl">
             <span
               className={`w-2 h-2 rounded-full inline-block shrink-0 ${listening ? 'bg-red-400 animate-pulse' : 'bg-[#A98946]'}`}
@@ -162,7 +225,7 @@ const VoiceAgent = forwardRef<VoiceAgentHandle, Props>(
             {listening && (
               <button
                 type="button"
-                onClick={stopMic}
+                onClick={() => latest.current.onMicChange(false)}
                 aria-label="Stop listening"
                 className="text-[10px] font-semibold uppercase letter-luxury text-white/70 hover:text-white shrink-0 cursor-pointer"
               >
@@ -170,47 +233,6 @@ const VoiceAgent = forwardRef<VoiceAgentHandle, Props>(
               </button>
             )}
           </div>
-        )}
-
-        {supported ? (
-          <>
-            <button
-              type="button"
-              onClick={() => setMuted((v) => !v)}
-              aria-label={muted ? 'Unmute spoken replies' : 'Mute spoken replies'}
-              title={muted ? 'Aisha is muted — unmute to hear her' : 'Mute Aisha'}
-              className="w-9 h-9 rounded-full flex items-center justify-center border border-[#DED7CA] text-[#625F58] hover:border-[#A98946] hover:text-[#A98946] transition-colors shrink-0 cursor-pointer"
-            >
-              {muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-            </button>
-            <button
-              type="button"
-              onClick={toggleMic}
-              aria-pressed={micOn || suspended}
-              aria-label={(micOn || suspended) ? 'Stop voice input' : 'Talk instead of typing'}
-              title={(micOn || suspended) ? 'Stop listening' : 'Talk instead of typing'}
-              className={`w-11 h-11 rounded-full flex items-center justify-center border border-[#A98946] text-[#A98946] hover:bg-[#A98946] hover:text-white transition-colors shrink-0 cursor-pointer ${micActive}`}
-            >
-              <Mic className="w-4 h-4" />
-            </button>
-          </>
-        ) : (
-          <>
-            {enabled && (
-              <p className="absolute left-3 right-3 bottom-[84px] z-10 text-center text-[10px] font-sans-ui text-[#9A968D]">
-                Voice is available in Chrome, Edge or Safari — type anytime.
-              </p>
-            )}
-            <button
-              type="button"
-              disabled
-              aria-label="Voice not supported in this browser"
-              title="Voice not supported in this browser"
-              className="w-11 h-11 rounded-full flex items-center justify-center border border-[#DED7CA] text-[#C8C2B6] opacity-70 shrink-0 cursor-not-allowed"
-            >
-              <Mic className="w-4 h-4" />
-            </button>
-          </>
         )}
       </>
     );

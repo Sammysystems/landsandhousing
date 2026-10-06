@@ -199,13 +199,80 @@ const pickVoice = (voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null 
   return [...voices].sort((a, b) => rank(a) - rank(b))[0] ?? null;
 };
 
-const tidy = (raw: string): string =>
-  raw
-    .replace(/\u20A6/g, ' naira ') // ₦ → spoken
+const tidy = (raw: string): string => {
+  let s = raw;
+  // Pronounce the words speech engines mangle. Order matters: phrases first.
+  for (const [re, rep] of SPELL) s = s.replace(re, rep);
+  // Shaped amounts first ("45M" → "45 million"), then plain grouped integers.
+  s = s
+    .replace(/\b(\d+(?:\.\d+)?)\s*M\b(?![a-z])/gi, '$1 million')
+    .replace(/\b(\d+(?:\.\d+)?)\s*K\b(?![a-z])/gi, '$1 thousand')
+    .replace(/\b(\d+(?:\.\d+)?)\s*B\b(?![a-z])/gi, '$1 billion');
+  s = s.replace(/\b(\d[\d,]*)\b/g, (m) => {
+    const digits = m.replace(/,/g, '');
+    if (!/^\d+$/.test(digits)) return m;
+    if (digits.length <= 3 && !m.includes(',')) return m; // small numbers the engine reads fine
+    const n = Number(digits);
+    if (!Number.isFinite(n) || n > 999_999_999_999) return m;
+    return sayNumber(n);
+  });
+  return s
     .replace(/[\/\\*_`|~#[\]]/g, ' ')
     .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ') // emoji
     .replace(/\s+/g, ' ')
     .trim();
+};
+
+const SPELL: [RegExp, string][] = [
+  [/\bLandsandHousing\b/gi, 'Lands and Housing'],
+  [/\bAkwa Ibom\b/gi, 'Ak-wah Ee-bom'],
+  [/\bUyo\b/gi, 'Oo-yo'],
+  [/\bEwet\b/gi, 'E-wet'],
+  [/\bIkot Ekpene\b/gi, 'Ee-kot Ek-pen-ay'],
+  [/\bCalabar\b/gi, 'Kal-a-bar'],
+  [/\bPort Harcourt\b/gi, 'Port Har-cut'],
+  [/\bsqm\b/gi, 'square metres'],
+  [/\bsqft\b/gi, 'square feet'],
+  [/\bBHK\b/gi, 'B H K'],
+  [/\bC\.?O\.?O\b/gi, 'Certificate of Occupancy'],
+  [/\u20A6/g, 'naira'],
+];
+
+const ONES = [
+  'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+  'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
+  'seventeen', 'eighteen', 'nineteen',
+];
+const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+
+const sayBelow1000 = (n: number): string => {
+  if (n < 20) return ONES[n];
+  if (n < 100) {
+    const t = Math.floor(n / 10);
+    const r = n % 10;
+    return TENS[t] + (r ? '-' + ONES[r] : '');
+  }
+  const h = Math.floor(n / 100);
+  const r = n % 100;
+  return ONES[h] + ' hundred' + (r ? ' and ' + sayBelow1000(r) : '');
+};
+
+const sayNumber = (n: number): string => {
+  if (n < 1000) return sayBelow1000(n);
+  if (n < 1_000_000) {
+    const th = Math.floor(n / 1000);
+    const r = n % 1000;
+    return sayBelow1000(th) + ' thousand' + (r ? ' ' + sayBelow1000(r) : '');
+  }
+  if (n < 1_000_000_000) {
+    const m = Math.floor(n / 1_000_000);
+    const r = n % 1_000_000;
+    return sayBelow1000(m) + ' million' + (r ? ' ' + sayNumber(r) : '');
+  }
+  const b = Math.floor(n / 1_000_000_000);
+  const r = n % 1_000_000_000;
+  return sayBelow1000(b) + ' billion' + (r ? ' ' + sayNumber(r) : '');
+};
 
 export const speak = (text: string, opts?: { rate?: number; onEnd?: () => void }): void => {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;

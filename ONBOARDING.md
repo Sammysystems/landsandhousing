@@ -306,21 +306,35 @@ Carried over from this build, where each was a real defect found by testing:
 
 Since v2.1 the advisor can be **talked to as well as typed to** — same assistant,
 same questions, same honesty rules. This is an *input mode*, not a separate agent.
+Since v2.2 the advisor opens **call-first**: a phone-style call screen.
 
 **How it works for the visitor**
-- Open the advisor (any "Speak with an Advisor" button) and Aisha greets out loud.
-- Tap the mic in the composer to talk; your words appear as a normal message and
-  Aisha replies in voice *and* on screen — property cards, choice chips and the
-  booking form still appear as usual.
-- The mic stays on until you tap it again; while Aisha is speaking the mic
-  briefly pauses so she never hears her own reply. Tap the mic to interrupt.
-- The speaker toggle mutes her voice without affecting the chat.
+- Open the advisor (any "Speak with an Advisor" button) and it opens as a **voice
+  call** — a short ring (soft, only if not muted), then Aisha connects and greets
+  out loud with the mic already hearing.
+- Live captions show what the visitor said and Aisha's last reply in a call-style
+  caption strip; the property cards and booking form arrive in a bottom sheet
+  while the call keeps running behind it.
+- Keypad: a 3×4 keypad lets the visitor "say it, or tap the digits" (used, for
+  example, when the brain asks for a phone number).
+- The mic stays on until muted/ended; while Aisha is speaking the mic briefly
+  pauses so she never hears her own reply. Barge in by speaking while she is quiet.
+  Mute silences her voice without stopping the microphone.
+- The **Transcript** button switches to the normal chat (call paused); the header
+  phone button returns to the call. The red **End** button (or ESC) hangs up.
+- **Receptionist rule:** Aisha listens first and answers exactly what was asked —
+  one answer per question, no scripted recommendations. The spoken line is the
+  reply itself, never meta commentary about the screen.
 
 **Platform facts to state in the handover**
 - Runs entirely in the visitor's browser — mic to text and text to voice. No new
   backend, no third-party accounts, no cost per minute.
 - Requires a modern browser's speech support: Chrome, Edge or Safari. In Firefox
   the chat still works normally (text only) with a small on-screen note.
+- Pronunciation: the engine reads common names and figures aloud correctly
+  ("LandsandHousing", "Uyo", "Ewet", "Akwa Ibom", ₦ and amounts like 45,000,000).
+  A Nigerian neural voice (edge-tts `en-NG-EzinneNeural`, still free) is the
+  marked upgrade path if a given device's local voice still mangles a name.
 - English only, matching the advisor's language; a second language is the same
   scope decision as elsewhere.
 - Not a phone line. A visitor can talk to the advisor *inside the site*; calling a
