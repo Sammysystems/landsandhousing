@@ -302,7 +302,38 @@ Carried over from this build, where each was a real defect found by testing:
 
 ---
 
-## 12. Open items
+## 12. Voice (spoken input and replies)
+
+Since v2.1 the advisor can be **talked to as well as typed to** — same assistant,
+same questions, same honesty rules. This is an *input mode*, not a separate agent.
+
+**How it works for the visitor**
+- Open the advisor (any "Speak with an Advisor" button) and Aisha greets out loud.
+- Tap the mic in the composer to talk; your words appear as a normal message and
+  Aisha replies in voice *and* on screen — property cards, choice chips and the
+  booking form still appear as usual.
+- The mic stays on until you tap it again; while Aisha is speaking the mic
+  briefly pauses so she never hears her own reply. Tap the mic to interrupt.
+- The speaker toggle mutes her voice without affecting the chat.
+
+**Platform facts to state in the handover**
+- Runs entirely in the visitor's browser — mic to text and text to voice. No new
+  backend, no third-party accounts, no cost per minute.
+- Requires a modern browser's speech support: Chrome, Edge or Safari. In Firefox
+  the chat still works normally (text only) with a small on-screen note.
+- English only, matching the advisor's language; a second language is the same
+  scope decision as elsewhere.
+- Not a phone line. A visitor can talk to the advisor *inside the site*; calling a
+  number is a future project (the voice engine is built behind an adapter so a
+  phone/WhatsApp transport can be added without touching the advisor brain).
+
+**No change to the rules.** The same brain produces the answers the voice reads
+out, so refusal rules, coverage, and the never-guess promise apply identically to
+spoken answers.
+
+---
+
+## 13. Open items
 
 - Connect the legacy enquiry forms to the same conversation state, so a visitor
   who starts in a form and opens the chat does not restart.

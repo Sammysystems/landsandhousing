@@ -3,6 +3,7 @@ import {
   X, Send, Phone, CalendarDays, Sparkles, RotateCcw, Check, ShieldCheck,
 } from 'lucide-react';
 import { BUSINESS_INFO } from '../data/mockData';
+import VoiceAgent, { type VoiceAgentHandle } from './VoiceAgent';
 
 /**
  * Concierge chat widget.
@@ -96,6 +97,23 @@ const formatPrice = (card: Card) => {
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
+/**
+ * Turn an API reply into words Aisha speaks. Cards and choice chips can't be
+ * spoken, so the visitor gets a short spoken pointer to the screen.
+ */
+const voiceLine = (data: { reply?: string; cards?: Card[]; actions?: Action[] }): string => {
+  const reply = (data.reply ?? '').trim();
+  if (!reply) return '';
+  const lines = [reply];
+  if (Array.isArray(data.cards) && data.cards.length) {
+    lines.push("I've sent the options to your screen.");
+  }
+  if (Array.isArray(data.actions) && data.actions.some((a) => a.type === 'option')) {
+    lines.push('You can say it out loud, or tap an option on screen.');
+  }
+  return lines.join(' ');
+};
+
 export default function ConciergeChat() {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -108,6 +126,13 @@ export default function ConciergeChat() {
   const sessionId = useRef<string>(getSessionId());
   const scrollRef = useRef<HTMLDivElement>(null);
   const nextId = useRef(1);
+  const voiceRef = useRef<VoiceAgentHandle>(null);
+
+  /** Speak a bot reply (voiceLine → TTS). No-op if muted or no panels. */
+  const speakData = useCallback((data: { reply?: string; cards?: Card[]; actions?: Action[] }) => {
+    const words = voiceLine(data);
+    if (words) voiceRef.current?.speak(words);
+  }, []);
 
   const lastCards = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -165,7 +190,9 @@ export default function ConciergeChat() {
           body: JSON.stringify({ type: 'chat', sessionId: sessionId.current, mode }),
         });
         if (!res.ok) throw new Error(String(res.status));
-        applyResponse(await res.json());
+        const data = await res.json();
+        applyResponse(data);
+        speakData(data);
       } catch {
         setMessages([
           {
@@ -219,7 +246,9 @@ export default function ConciergeChat() {
           body: JSON.stringify({ type: 'chat', sessionId: sessionId.current, message: text }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        applyResponse(await res.json());
+        const data = await res.json();
+        applyResponse(data);
+        speakData(data);
       } catch {
         setMessages((m) => [
           ...m,
@@ -277,19 +306,19 @@ export default function ConciergeChat() {
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data?.error ?? 'booking failed');
 
+      const confirmation = `You're booked, and our advisor has everything already — so there's nothing to repeat. ${ADVISOR.name} will confirm the exact time shortly. Anything else you'd like to know in the meantime?`;
       setMessages((m) => [
         ...m,
         {
           id: nextId.current++,
           role: 'bot',
-          text:
-            `You're booked, and our advisor has everything already — so there's nothing to repeat. ` +
-            `${ADVISOR.name} will confirm the exact time shortly. Anything else you'd like to know in the meantime?`,
+          text: confirmation,
           summary: data.summary ?? null,
           booked: true,
           actions: [{ type: 'whatsapp', label: 'Message the team', url: data.whatsapp }],
         },
       ]);
+      speakData({ reply: confirmation });
       setBooking(null);
     } catch {
       setMessages((m) => [
@@ -580,6 +609,7 @@ export default function ConciergeChat() {
               maxLength={500}
               className="flex-1 bg-[#F7F4EE] border border-[#DED7CA] rounded-full px-4 py-2.5 text-sm font-sans-ui text-[#171716] placeholder-[#9A968D] focus:outline-none focus:border-[#A98946] transition-colors"
             />
+            <VoiceAgent ref={voiceRef} enabled={open} onTranscript={(t) => send(t)} />
             <button
               type="submit"
               disabled={busy || !input.trim()}

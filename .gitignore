@@ -11,6 +11,9 @@ coverage/
 .vercel
 
 
+# Local video project — not part of the site deployment
+brag-landscape-2026-10-05/
+
 # InsForge & AI agent skills
 .insforge
 .agent
