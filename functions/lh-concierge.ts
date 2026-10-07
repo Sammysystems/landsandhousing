@@ -257,11 +257,14 @@ const noMatch =
 
 // ---------------------------------------------------------------- optional LLM polish
 
-const MODELS = [
-  Deno.env.get('OPENROUTER_CHAT_MODEL'),
-  'google/gemma-4-31b-it:free',
-  'qwen/qwen3.8-27b:free',
-].filter(Boolean) as string[];
+// Greeting polish is OFF by default. The free-tier models that used to sit in
+// this list would improvise — the exact failure that showed up as a hallucinating
+// voice. Enabling this now REQUIRES an explicitly configured, paid,
+// instruction-following model (a Claude or GPT via OpenRouter); free models are
+// deliberately refused because no prompt reliably stops them inventing facts.
+// With no model set, `llm()` returns null and every reply is deterministic, which
+// is the safe default this demo is built around.
+const MODELS: string[] = [Deno.env.get('OPENROUTER_CHAT_MODEL') ?? ''].filter(Boolean);
 
 async function llm(system: string, user: string, ms = 6000): Promise<string | null> {
   const key = Deno.env.get('OPENROUTER_API_KEY');
@@ -270,11 +273,12 @@ async function llm(system: string, user: string, ms = 6000): Promise<string | nu
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({
           model,
           messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
           max_tokens: 120,
+          temperature: 0.4,
         }),
         signal: AbortSignal.timeout(ms),
       });
@@ -289,8 +293,10 @@ async function llm(system: string, user: string, ms = 6000): Promise<string | nu
 
 const CHATTER_SYSTEM =
   'You are the LandsandHousing concierge, a warm and concise property advisor for Uyo, Akwa Ibom, Nigeria. ' +
-  'Reply in at most two short sentences. Never invent property details, prices, or availability. ' +
-  'If you are unsure, say you will check with an advisor.';
+  'Reply in at most two short sentences. You hold no data: every fact about listings, prices, availability, ' +
+  'areas, services, or the company must come from the caller, and you never state one that is not already ' +
+  'in this conversation. If a reply needs a fact you do not have, say you will check with an advisor. ' +
+  'Ask at most one question; never echo or invent contact details.';
 
 // ---------------------------------------------------------------- email
 
@@ -952,7 +958,9 @@ case 'greeting': {
         // re-introduce the service menu on top of the question we're already asking.
         reply = '';
       } else {
-        const polished = await llm(CHATTER_SYSTEM, heard);
+        // Voice is deterministic by policy: a spoken reply must never be model
+        // improvisation, even if a paid chatter model is configured later.
+        const polished = body.voice ? null : await llm(CHATTER_SYSTEM, heard);
         reply = polished ?? "Hello — good to hear from you. What can I help you with today?";
         source = polished ? 'llm' : 'deterministic';
       }

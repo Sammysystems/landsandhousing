@@ -27,6 +27,12 @@ const recognitionCtor = (): Ctor | null => {
   return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 };
 
+// Web Speech recognition does not ship every locale in every browser. en-NG is
+// the natural voice for this UK-backed property business, but on a device that
+// only knows en-US it must step down rather than die with
+// 'language-not-supported' — which is what made the "call" fail outright.
+const LANGS = ['en-NG', 'en-GB', 'en-US'];
+
 export const supportsVoice = (): boolean =>
   typeof window !== 'undefined' &&
   recognitionCtor() !== null &&
@@ -87,68 +93,95 @@ export const startListening = (handlers: RecognizeHandlers): void => {
 
   activeHandlers = handlers;
   committedFinals = 0;
-  const rec = new Ctor();
-  recognizer = rec;
-  rec.lang = 'en-NG';
-  rec.interimResults = true;
-  rec.continuous = true;
-  rec.maxAlternatives = 1;
+  let langAttempt = 0;
 
-  rec.onresult = (e: any) => {
-    const total = e.results.length;
-    let finalCount = 0;
-    for (let i = 0; i < total; i++) if (e.results[i]?.isFinal) finalCount++;
+  // boot() owns the recognizer lifecycle so a locale mismatch can rebuild the
+  // engine with the next language in LANGS without dropping the live handlers.
+  const boot = () => {
+    const rec = new Ctor();
+    recognizer = rec;
+    committedFinals = 0;
+    rec.lang = LANGS[Math.min(langAttempt, LANGS.length - 1)];
+    rec.interimResults = true;
+    rec.continuous = true;
+    rec.maxAlternatives = 1;
 
-    // Newly finalized phrase(s) since the last callback — fire them once.
-    if (finalCount > committedFinals) {
-      let text = '';
-      for (let i = committedFinals; i < finalCount; i++) {
-        text += e.results[i]?.[0]?.transcript ?? '';
+    rec.onresult = (e: any) => {
+      const total = e.results.length;
+      let finalCount = 0;
+      for (let i = 0; i < total; i++) if (e.results[i]?.isFinal) finalCount++;
+
+      // Newly finalized phrase(s) since the last callback — fire them once.
+      if (finalCount > committedFinals) {
+        let text = '';
+        for (let i = committedFinals; i < finalCount; i++) {
+          text += e.results[i]?.[0]?.transcript ?? '';
+        }
+        committedFinals = finalCount;
+        const clean = text.replace(/\s+/g, ' ').trim();
+        if (clean) activeHandlers?.onFinal(clean);
       }
-      committedFinals = finalCount;
-      const clean = text.replace(/\s+/g, ' ').trim();
-      if (clean) activeHandlers?.onFinal(clean);
-    }
 
-    // Live interim for the phrase still being spoken.
-    let interim = '';
-    for (let i = finalCount; i < total; i++) {
-      interim += e.results[i]?.[0]?.transcript ?? '';
-    }
-    if (interim.trim()) activeHandlers?.onInterim?.(interim.trim());
-  };
-
-  rec.onerror = (e: any) => {
-    const code = e?.error;
-    if (code === 'aborted' || code === 'no-speech') return; // handled paths
-    const h = activeHandlers;
-    teardown();
-    activeHandlers = null;
-    h?.onError?.(errorHint(code));
-  };
-
-  rec.onend = () => {
-    if (!activeHandlers) return;
-    // External/transient end (tab hidden, network blip) — get back to hearing.
-    restartTimer = window.setTimeout(() => {
-      if (!activeHandlers || !recognizer) return;
-      try {
-        committedFinals = 0;
-        recognizer.start();
-      } catch {
-        const h = activeHandlers;
-        activeHandlers = null;
-        h?.onError?.(errorHint());
+      // Live interim for the phrase still being spoken.
+      let interim = '';
+      for (let i = finalCount; i < total; i++) {
+        interim += e.results[i]?.[0]?.transcript ?? '';
       }
-    }, 350);
+      if (interim.trim()) activeHandlers?.onInterim?.(interim.trim());
+    };
+
+    rec.onerror = (e: any) => {
+      const code = e?.error;
+      if (code === 'aborted' || code === 'no-speech') return; // handled paths
+
+      // A language the engine does not ship is not a failure. Step down the chain
+      // (en-NG → en-GB → en-US) and carry on listening on the next best locale.
+      if (code === 'language-not-supported' && langAttempt < LANGS.length - 1) {
+        const keep = activeHandlers;
+        const old = recognizer;
+        recognizer = null;
+        try {
+          old?.stop();
+        } catch {
+          /* already stopped */
+        }
+        activeHandlers = keep;
+        langAttempt += 1;
+        boot();
+        return;
+      }
+
+      const h = activeHandlers;
+      teardown();
+      activeHandlers = null;
+      h?.onError?.(errorHint(code));
+    };
+
+    rec.onend = () => {
+      if (!activeHandlers) return;
+      // External/transient end (tab hidden, network blip) — get back to hearing.
+      restartTimer = window.setTimeout(() => {
+        if (!activeHandlers || !recognizer) return;
+        try {
+          committedFinals = 0;
+          recognizer.start();
+        } catch {
+          const h = activeHandlers;
+          activeHandlers = null;
+          h?.onError?.(errorHint());
+        }
+      }, 350);
+    };
+
+    try {
+      rec.start();
+    } catch {
+      activeHandlers = null;
+      handlers.onError?.(errorHint());
+    }
   };
 
-  try {
-    rec.start();
-  } catch {
-    activeHandlers = null;
-    handlers.onError?.(errorHint());
-  }
+  boot();
 };
 
 export const stopListening = (): void => {
@@ -183,7 +216,9 @@ loadVoices();
 
 /**
  * Best available voice: Nigerian English first, then UK English, then US —
- * preferring a female-sounding voice within each language.
+ * preferring a female-sounding voice within each language. Ties are broken by a
+ * quality signal so the agent does not land on the stiff OS default ("Microsoft
+ * Zira") when a natural neural/Google voice is installed.
  */
 const pickVoice = (voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null => {
   if (!voices.length) return null;
@@ -195,7 +230,9 @@ const pickVoice = (voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null 
     return 9;
   };
   const sex = (v: SpeechSynthesisVoice) => (FEMALE_HINT.test(v.name) ? 0 : 1);
-  const rank = (v: SpeechSynthesisVoice) => langRank(v.lang) * 4 + sex(v);
+  const quality = (v: SpeechSynthesisVoice) =>
+    /google|natural|neural|enhanced|online|wavenet|premium/i.test(v.name) ? 0 : 1;
+  const rank = (v: SpeechSynthesisVoice) => langRank(v.lang) * 9 + sex(v) * 3 + quality(v);
   return [...voices].sort((a, b) => rank(a) - rank(b))[0] ?? null;
 };
 
@@ -276,13 +313,16 @@ const sayNumber = (n: number): string => {
 
 export const speak = (text: string, opts?: { rate?: number; onEnd?: () => void }): void => {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  // Voices load asynchronously; re-read them so the first spoken line rides the
+  // natural voice instead of whatever default the engine had before they arrived.
+  refreshVoices();
   const clean = tidy(text);
   if (!clean) return;
 
   window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(clean);
   utterance = u;
-  u.rate = opts?.rate ?? 1.02;
+  u.rate = opts?.rate ?? 1.0;
   u.pitch = 1;
   u.volume = 1;
 
@@ -298,6 +338,16 @@ export const speak = (text: string, opts?: { rate?: number; onEnd?: () => void }
     opts?.onEnd?.();
   };
   window.speechSynthesis.speak(u);
+
+  // Chrome sometimes swallows the first utterance of a queue; nudging the
+  // synthesizer keeps it from sitting silent while the UI thinks it is talking.
+  if (!window.speechSynthesis.speaking) {
+    try {
+      window.speechSynthesis.resume();
+    } catch {
+      /* resume is not guaranteed on every engine */
+    }
+  }
 };
 
 export const stopSpeaking = (): void => {

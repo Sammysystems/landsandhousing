@@ -282,7 +282,7 @@ export default function ConciergeChat() {
   }, [view, connected]);
 
   const send = useCallback(
-    async (raw: string) => {
+    async (raw: string, opts?: { voice?: boolean }) => {
       const text = raw.trim();
       if (!text || busy) return;
 
@@ -295,7 +295,12 @@ export default function ConciergeChat() {
         const res = await fetch(ENDPOINT, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'chat', sessionId: sessionId.current, message: text }),
+          body: JSON.stringify({
+            type: 'chat',
+            sessionId: sessionId.current,
+            message: text,
+            voice: opts?.voice ?? false,
+          }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -789,7 +794,7 @@ export default function ConciergeChat() {
             onMutedChange={setMuted}
             onTranscript={(t) => {
               setLastPair((p) => ({ ...p, q: t }));
-              void send(t);
+              void send(t, { voice: true });
             }}
             onStatus={setVoiceStatus}
             pillVisible={view === 'chat'}
